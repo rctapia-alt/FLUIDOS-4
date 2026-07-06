@@ -411,7 +411,10 @@ body{
   position:fixed;inset:0;width:100%;height:100%;
   z-index:199;overflow:hidden;background:#000;
 }
-#arVideoWrap video{
+/* Solo el vídeo del MODO CÁMARA se recorta a pantalla (cover). El del modo
+   marcador lo dimensiona AR.js: si le forzáramos "cover" aquí, se ampliaría
+   y descuadraría la detección del Hiro. */
+#arVideoWrap.mode-camera video{
   position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
   min-width:100%;min-height:100%;
   width:auto;height:auto;object-fit:cover;
@@ -752,4 +755,3 @@ body{
 
   .ar-topbar{row-gap:6px;}
 }
-

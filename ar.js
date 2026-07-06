@@ -93,6 +93,12 @@ const AR = (() => {
   // cámara mira hacia -Z). El pinch escala; el pan mueve en X/Y.
   const PLACE_DEPTH = 6;
 
+  // Inclinación inicial de presentación en modo cámara: se cabecea el modelo
+  // ~20° para que los anillos/discos horizontales se vean como elipses en
+  // perspectiva 3/4 (no de canto, que parecía "aplastado"). El alumno lo
+  // reorienta luego con un dedo.
+  const PRESENT_PITCH = 0.35;
+
   // Límites de desplazamiento (pan) del modelo respecto al centro, en
   // unidades de mundo. Evita que el estudiante "pierda" el modelo
   // empujándolo fuera de cuadro sin querer.
@@ -457,6 +463,11 @@ const AR = (() => {
       videoEl.addEventListener("loadedmetadata", () => {
         videoEl.play && videoEl.play().catch(() => {});
         onResizeAR();
+        // Reajuste diferido: al abrir AR el canvas pasa de display:none a
+        // visible, y su tamaño de layout puede no estar listo en el primer
+        // frame. Un par de rAF garantizan que la relación de aspecto se
+        // calcule con las dimensiones REALES (evita el modelo aplastado).
+        requestAnimationFrame(() => requestAnimationFrame(onResizeAR));
         if (onReady) onReady();
       }, { once: true });
     }).catch((err) => {
@@ -469,7 +480,11 @@ const AR = (() => {
   function onResizeAR() {
     if (!renderer || !camera) return;
     const w = window.innerWidth, h = window.innerHeight;
-    renderer.setSize(w, h, false);
+    // updateStyle=true: el renderer fija también el tamaño CSS del canvas,
+    // así el buffer de dibujo y el tamaño mostrado tienen EXACTAMENTE la
+    // misma relación de aspecto. Con false, el CSS (100%x100%) podía no
+    // coincidir con el buffer y estiraba/aplastaba el modelo.
+    renderer.setSize(w, h, true);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
@@ -503,37 +518,39 @@ const AR = (() => {
 
     arToolkitSource = new THREEx.ArToolkitSource({
       sourceType: "webcam",
-      sourceWidth:  window.innerWidth > window.innerHeight ? 1280 : 720,
-      sourceHeight: window.innerWidth > window.innerHeight ? 720 : 1280
+      // Se pide en horizontal (AR.js y camera_para.dat están calibrados para
+      // 640x480 apaisado). AR.js rota/ajusta internamente para el móvil en
+      // vertical mediante onResizeElement, evitando el recorte con zoom.
+      sourceWidth: 640,
+      sourceHeight: 480
     });
 
     arToolkitSource.init(function onSourceReady() {
-      // AR.js inserta su <video> en document.body con estilos en línea. Lo
-      // reubicamos dentro de #arVideoWrap y forzamos el "cover" centrado.
+      // AR.js inserta su <video> en document.body. Lo reubicamos dentro de
+      // #arVideoWrap. NO forzamos objectFit:cover ni min-width/height: dejamos
+      // que AR.js dimensione el vídeo con onResizeElement (copyElementSizeTo),
+      // que es lo que mantiene alineado el tracking con lo que se ve. Forzar
+      // "cover" era lo que ampliaba la imagen y descuadraba la detección.
       const wrap = document.getElementById("arVideoWrap");
       const video = arToolkitSource.domElement;
       if (wrap && video) {
         wrap.innerHTML = "";
         wrap.appendChild(video);
         video.style.position = "absolute";
-        video.style.top = "50%";
-        video.style.left = "50%";
-        video.style.transform = "translate(-50%, -50%)";
+        video.style.top = "0";
+        video.style.left = "0";
         video.style.zIndex = "0";
-        video.style.width = "auto";
-        video.style.height = "auto";
-        video.style.minWidth = "100%";
-        video.style.minHeight = "100%";
-        video.style.objectFit = "cover";
-        // Mover un <video> con appendChild lo PAUSA en Android Chrome: hay
-        // que reafirmar reproducción en línea y volver a llamar play().
         video.setAttribute("playsinline", "");
         video.setAttribute("webkit-playsinline", "");
         video.muted = true;
         video.play && video.play().catch(() => {});
       }
       video.addEventListener("canplay", () => setupMarkerContext(onReady), { once: true });
-      setTimeout(onResizeMarker, 400);
+      // Varios reajustes escalonados: AR.js necesita que el vídeo tenga
+      // dimensiones reales antes de encajar el canvas de detección.
+      setTimeout(onResizeMarker, 300);
+      setTimeout(onResizeMarker, 800);
+      setTimeout(onResizeMarker, 1500);
     }, function onSourceError(err) {
       onCameraError(err);
     });
@@ -589,7 +606,13 @@ const AR = (() => {
         arToolkitSource.copyElementSizeTo(arToolkitContext.arController.canvas);
       }
     }
-    if (camera) { /* proyección la fija AR.js; nada más que hacer */ }
+    // Tras reajustar, AR.js recalcula su matriz de proyección según el nuevo
+    // aspecto: hay que volver a copiarla a la cámara o el modelo se ve
+    // descuadrado / fuera de pantalla.
+    if (camera && arToolkitContext && markerReady) {
+      const p = arToolkitContext.getProjectionMatrix && arToolkitContext.getProjectionMatrix();
+      if (p) camera.projectionMatrix.copy(p);
+    }
   }
 
   // Aparición/desaparición del modelo según el marcador, con debounce.
@@ -663,10 +686,11 @@ const AR = (() => {
       // Su visibilidad la controla markerFound/markerLost.
       placedRoot.visible = markerVisible;
     } else {
-      // Modo cámara: cuelga de la escena, centrado frente a la cámara.
+      // Modo cámara: cuelga de la escena, centrado frente a la cámara, en
+      // perspectiva 3/4 (con el cabeceo de presentación).
       if (placedRoot.parent !== scene) scene.add(placedRoot);
       placedRoot.position.set(0, -PLACE_DEPTH * 0.12, -PLACE_DEPTH);
-      placedRoot.rotation.set(0, 0, 0);
+      placedRoot.rotation.set(PRESENT_PITCH, 0, 0);
       placedRoot.visible = modelPlaced;
     }
   }
@@ -681,6 +705,10 @@ const AR = (() => {
         b.classList.toggle("active", b.dataset.arMode === arMode);
       });
     }
+    // Clase en el contenedor de vídeo: activa el recorte "cover" solo en modo
+    // cámara (en marcador lo dimensiona AR.js).
+    const wrap = document.getElementById("arVideoWrap");
+    if (wrap) wrap.classList.toggle("mode-camera", arMode === "camera");
     const placeBtn = document.getElementById("arPlaceBtn");
     const centerBtn = document.getElementById("arResetPlacement");
     const markerHint = document.getElementById("arMarkerHint");
@@ -730,9 +758,9 @@ const AR = (() => {
   function placeModel() {
     if (!placedRoot || arMode !== "camera") return;
     // Reinicia la orientación/posición del gesto para que aparezca centrado
-    // y de frente cada vez que se coloca.
+    // y en una perspectiva 3/4 agradable cada vez que se coloca.
     placedRoot.position.set(0, -PLACE_DEPTH * 0.12, -PLACE_DEPTH);
-    placedRoot.rotation.set(0, 0, 0);
+    placedRoot.rotation.set(PRESENT_PITCH, 0, 0);
     placedRoot.visible = true;
     modelPlaced = true;
     syncPlaceButton();
@@ -1193,12 +1221,13 @@ const AR = (() => {
   function resetPlacement() {
     userScale = 1;
     if (placedRoot) {
-      placedRoot.rotation.set(0, 0, 0);
       if (arMode === "marker") {
         // Sobre el marcador: vuelve al origen del ancla (deshace orbita/pan).
+        placedRoot.rotation.set(0, 0, 0);
         placedRoot.position.set(0, 0, 0);
       } else {
-        // Modo cámara: re-centra el modelo frente a la cámara.
+        // Modo cámara: re-centra el modelo en perspectiva 3/4.
+        placedRoot.rotation.set(PRESENT_PITCH, 0, 0);
         placedRoot.position.set(0, -PLACE_DEPTH * 0.12, -PLACE_DEPTH);
         placedRoot.visible = true;
         modelPlaced = true;
